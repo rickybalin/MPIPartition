@@ -7,54 +7,47 @@ box_size = 1.0
 
 # partitioning a box with the available MPI ranks
 # if no argument is specified, the dimension of the volume is 3
-partition = Partition(dimensions=2)
+partition = Partition(dimensions=2, create_neighbor_topo=True)
+neighbors = partition.neighbor_ranks # list -- gets the neighboring ranks assuming periodicity in all directions
+n_neighbors = len(neighbors)
 
 # number of random particles per rank
 n_local = 4
 
-# randomly distributed particles in the unit cube
+# Create grid
+x = np.linspace(partition.origin[0],partition.origin[0]+partition.extent[0],num=n_local,dtype=np.double)
+y = np.linspace(partition.origin[1],partition.origin[1]+partition.extent[1],num=n_local,dtype=np.double)
+X, Y = np.meshgrid(x, y)
 data = {
-    "x": np.linspace(partition.origin[0],partition.origin[0]+partition.extent[0],n_local), #np.random.uniform(0, 1, n_local),
-    "y": np.linspace(partition.origin[1],partition.origin[1]+partition.extent[1],n_local), #np.random.uniform(0, 1, n_local),
-    "id": n_local * partition.rank + np.arange(n_local),
-    "rank": np.ones(n_local) * partition.rank
+    "x": X.flatten(), #np.random.uniform(0, 1, n_local),
+    "y": Y.flatten(), #np.random.uniform(0, 1, n_local),
+    "id": n_local**2 * partition.rank + np.arange(n_local**2),
+    "rank": np.ones(n_local**2, dtype=np.int64) * partition.rank
 }
-#print(partition.rank,data['x'],flush=True)
 
-# assign to rank by position
-#data_distributed = distribute(partition, box_size, data, ('x', 'y'))
-#print(partition.rank,data_distributed['x'],flush=True)
-
-# make sure we still have all particles
-#n_local_distributed = len(data_distributed['x'])
-#n_global_distributed = partition.comm.reduce(n_local_distributed)
-#if partition.rank == 0:
-#    assert n_global_distributed == n_local * partition.nranks
-
-# validate that each particle is in local extent
-#bbox = np.array([
-#   np.array(partition.origin),
-#   np.array(partition.origin) + np.array(partition.extent)
-#]).T
-#is_valid = np.ones(n_local_distributed, dtype=np.bool_)
-#for i, x in enumerate('xy'):
-#    is_valid &= data_distributed[x] >= bbox[i, 0]
-#    is_valid &= data_distributed[x] < bbox[i, 1]
-#assert np.all(is_valid)
-
-"""
-overload_length = 0.1
-coord_keys = ['x', 'y', 'z']
-assert len(coord_keys) == partition.dimensions
-print(partition.decomposition)
-for i in range(partition.dimensions):
-    print(partition.rank,partition.dimensions,partition.decomposition[i])
-    assert partition.decomposition[i] > 1  # currently can't overload if only 1 rank
-    # we only overload particles in one layer of the domain decomposition
-    # so we cannot overload to more than the extent of each partition
-    assert overload_length < partition.extent[i] * box_size
-"""
+# Overload the partitions
 data_overloaded = overload(partition, box_size, data, 0.1, ('x', 'y'))
-if partition.rank==0: print('\n',data_overloaded['x'])
-if partition.rank==0: print('\n',data_overloaded['id'])
-if partition.rank==0: print('\n',data_overloaded['rank'])
+
+neighbors2 = np.unique(data_overloaded['rank'])
+neighbors2 = np.delete(neighbors2,np.argwhere(neighbors2==partition.rank).item())
+assert np.allclose(np.array(neighbors),neighbors2)
+
+# Create halo_info of shape [num_halo,3], where
+# col 0 = node ID (local reduced) on local rank
+# col 1 = node ID (local reduced) on neighbor rank
+# col 2 = neighbor rank ID
+idx = np.argwhere(data_overloaded['rank'] != partition.rank)
+n_halo = len(idx)
+assert data_overloaded['rank'].size == n_local**2+n_halo
+halo_info = np.hstack((
+    idx,
+    data_overloaded['id'][idx]-data_overloaded['rank'][idx]*n_local**2,
+    data_overloaded['rank'][idx]
+))
+print(partition.rank,' Number of halo nodes ',n_halo,flush=True)
+print(partition.rank,' halo_info ',halo_info,flush=True)
+
+# Create node degree of shape (n_local+n_halo) with number of times a node is repeated across all parts
+# could create a mask on each rank with 0 if global ID is not present and 1 if it is present, then do an allreduce sum on the mask and count
+
+# Create edge weight of shape (n_edges) with number of times an edge is repeated across all parts
